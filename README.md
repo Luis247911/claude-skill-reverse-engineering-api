@@ -51,22 +51,129 @@ For each run the orchestrator writes five files under `out/<run-id>/`:
 - `api-map.md`: endpoint summary, payload fields, workflow ordering
 - `tests/client.spec.ts`: vitest cases with a mocked `fetch`
 
-## Quick start
+## Setup
 
 ```bash
+git clone https://github.com/Luis247911/claude-skill-reverse-engineering-api.git
+cd claude-skill-reverse-engineering-api
 npm install
 npm test
 ```
 
-End-to-end against an open sandbox (real network, no auth):
+## Workflow: from your webapp to a typed client
+
+You have a webapp that has no documented API. You log in, do something in the UI, and want to script the same action. Pick the path that matches what you have.
+
+### Path A: HAR file (no Claude Code needed)
+
+The most direct path. Works on any operating system, no MCP setup.
+
+1. **Open the webapp** in Chrome (or any Chromium browser) and log in.
+2. **Open DevTools** (F12), go to the **Network** tab, click the round record button if it is not red.
+3. **Clear the network log** (the ⊘ icon).
+4. **Do the one UI action** you want to model. Just that one. Do it 2-3 times with slightly different inputs so the kit can tell required fields from optional ones.
+5. **Right-click any row in the Network panel → "Save all as HAR with content"**. Save to `captures/my-run.har`.
+6. **Create a small driver script** at `scripts/my-run.ts`:
+
+```ts
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { loadHar } from "../src/capture/har-loader.js";
+import { analyze, generate } from "../src/core/orchestrator.js";
+
+const runId = "my-run";
+const exchanges = loadHar(readFileSync(`captures/${runId}.har`, "utf-8"));
+
+const result = analyze({
+  exchanges,
+  metadata: {
+    runId,
+    scope: "create candidate and attach to job",
+    startedAt: new Date().toISOString(),
+    targetBaseUrl: "https://app.your-tool.example",
+    captureSource: "har",
+  },
+});
+
+const out = generate(result);
+const dir = resolve("out", runId);
+mkdirSync(resolve(dir, "tests"), { recursive: true });
+writeFileSync(resolve(dir, "client.ts"), out.clientTs);
+writeFileSync(resolve(dir, "types.ts"), out.typesTs);
+writeFileSync(resolve(dir, "errors.ts"), out.errorsTs);
+writeFileSync(resolve(dir, "api-map.md"), out.apiMapMd);
+writeFileSync(resolve(dir, "tests", "client.spec.ts"), out.testsTs);
+console.log(`Wrote ${result.mutations.length} mutations to ${dir}`);
+```
+
+7. **Run it:**
+
+```bash
+npx tsx scripts/my-run.ts
+```
+
+The five files land in `out/my-run/`. Both the HAR and the output are gitignored.
+
+### Path B: cURL strings copied from DevTools
+
+Same as Path A but you copy individual requests instead of exporting the whole HAR.
+
+1. In DevTools → Network, right-click the request that does the actual mutation → **Copy → Copy as cURL (bash)**.
+2. Repeat 2-3 times for the same action with different inputs.
+3. Replace step 6 of Path A with:
+
+```ts
+import { parseCurl } from "../src/capture/curl-parser.js";
+
+const exchanges = [
+  parseCurl(`curl 'https://app.your-tool.example/api/candidates' ...`, "req-1"),
+  parseCurl(`curl 'https://app.your-tool.example/api/candidates' ...`, "req-2"),
+  parseCurl(`curl 'https://app.your-tool.example/api/candidates' ...`, "req-3"),
+];
+```
+
+### Path C: live capture inside Claude Code (Chrome DevTools MCP)
+
+If you use Claude Code with the Chrome DevTools MCP server, the skill drives the browser for you.
+
+1. Open Claude Code in this repo or any project, with the Chrome DevTools MCP enabled.
+2. Type `/reverse-engineer`. The skill wizard asks for scope, target URL, and capture source. Pick "live (Chrome MCP)".
+3. The wizard opens the target page, you log in, you do the UI action. The skill captures every network exchange, sanitises it, runs the analysis pipeline, and writes the client into `out/<run-id>/`.
+
+## Using the generated client in your own project
+
+Copy `out/<run-id>/client.ts`, `types.ts`, and `errors.ts` into your application. Then:
+
+```ts
+import { ApiClient } from "./api/client.js";
+
+const api = new ApiClient({
+  baseUrl: "https://app.your-tool.example",
+  defaultHeaders: {
+    // Whatever your webapp uses. The kit does not capture your session.
+    Authorization: `Bearer ${process.env.APP_TOKEN}`,
+    "X-CSRF-Token": process.env.APP_CSRF ?? "",
+  },
+});
+
+const candidate = await api.createCandidate({
+  firstName: "Max",
+  lastName: "Muster",
+  email: "max@example.com",
+});
+```
+
+The kit does not capture or replay your auth for you. You bring `Authorization`, `Cookie`, `X-CSRF-Token`, or whatever the target expects, via `defaultHeaders` or a custom `fetchImpl`. See `docs/USAGE.md` for the Playwright `storageState` pattern when you want to share a logged-in browser session with the client.
+
+## See it work first
+
+Before pointing the kit at a real target, verify it runs end-to-end on your machine against an open sandbox (real network, no auth):
 
 ```bash
 npx tsx scripts/e2e-dummyjson.ts
 ```
 
-That run hits `dummyjson.com` six times (3x POST /posts/add, 2x PUT /posts/1, 1x DELETE /posts/1), writes a sanitised HAR to `captures/<run-id>/raw.har`, generates a client into `out/<run-id>/`, and smoke-tests one generated method against the live sandbox.
-
-The same pipeline runs inside Claude Code via the `reverse-engineering-api` skill, which adds a wizard for scope, source, and verification.
+That run hits `dummyjson.com` six times (POST /posts/add, PUT /posts/1, DELETE /posts/1), writes a sanitised HAR to `captures/<run-id>/raw.har`, generates a client into `out/<run-id>/`, and smoke-tests one generated method. Use it as a known-good reference for what the output should look like.
 
 ## Privacy and GitHub mode
 
