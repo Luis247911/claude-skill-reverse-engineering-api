@@ -51,98 +51,48 @@ For each run the orchestrator writes five files under `out/<run-id>/`:
 - `api-map.md`: endpoint summary, payload fields, workflow ordering
 - `tests/client.spec.ts`: vitest cases with a mocked `fetch`
 
-## Setup
+## How to use
+
+This is a Claude Code skill. You install it once, then drive it with one command.
+
+### 1. Prerequisites
+
+- [Claude Code](https://claude.com/claude-code) installed and logged in.
+- Node.js 20+ (`npm install` runs in step 2).
+- The [Chrome DevTools MCP server](https://github.com/ChromeDevTools/chrome-devtools-mcp) enabled in Claude Code if you want live browser capture (optional; HAR and cURL also work without it).
+
+### 2. Install the skill
+
+Clone the repo directly into your Claude Code skills directory:
 
 ```bash
-git clone https://github.com/Luis247911/claude-skill-reverse-engineering-api.git
-cd claude-skill-reverse-engineering-api
+git clone https://github.com/Luis247911/claude-skill-reverse-engineering-api.git \
+  ~/.claude/skills/reverse-engineering-api
+cd ~/.claude/skills/reverse-engineering-api
 npm install
-npm test
 ```
 
-## Workflow: from your webapp to a typed client
+That is it. The skill is now registered. No editing config, no copying scripts.
 
-You have a webapp that has no documented API. You log in, do something in the UI, and want to script the same action. Pick the path that matches what you have.
+### 3. Run it
 
-### Path A: HAR file (no Claude Code needed)
+Open Claude Code in **your own project** (the one where you want the generated client to land, not in the skill directory). Type:
 
-The most direct path. Works on any operating system, no MCP setup.
-
-1. **Open the webapp** in Chrome (or any Chromium browser) and log in.
-2. **Open DevTools** (F12), go to the **Network** tab, click the round record button if it is not red.
-3. **Clear the network log** (the ⊘ icon).
-4. **Do the one UI action** you want to model. Just that one. Do it 2-3 times with slightly different inputs so the kit can tell required fields from optional ones.
-5. **Right-click any row in the Network panel → "Save all as HAR with content"**. Save to `captures/my-run.har`.
-6. **Create a small driver script** at `scripts/my-run.ts`:
-
-```ts
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { loadHar } from "../src/capture/har-loader.js";
-import { analyze, generate } from "../src/core/orchestrator.js";
-
-const runId = "my-run";
-const exchanges = loadHar(readFileSync(`captures/${runId}.har`, "utf-8"));
-
-const result = analyze({
-  exchanges,
-  metadata: {
-    runId,
-    scope: "create candidate and attach to job",
-    startedAt: new Date().toISOString(),
-    targetBaseUrl: "https://app.your-tool.example",
-    captureSource: "har",
-  },
-});
-
-const out = generate(result);
-const dir = resolve("out", runId);
-mkdirSync(resolve(dir, "tests"), { recursive: true });
-writeFileSync(resolve(dir, "client.ts"), out.clientTs);
-writeFileSync(resolve(dir, "types.ts"), out.typesTs);
-writeFileSync(resolve(dir, "errors.ts"), out.errorsTs);
-writeFileSync(resolve(dir, "api-map.md"), out.apiMapMd);
-writeFileSync(resolve(dir, "tests", "client.spec.ts"), out.testsTs);
-console.log(`Wrote ${result.mutations.length} mutations to ${dir}`);
+```
+/reverse-engineer
 ```
 
-7. **Run it:**
+The skill takes over. It will ask you:
 
-```bash
-npx tsx scripts/my-run.ts
-```
+1. **What UI action do you want to model?** (one sentence, e.g. "create a candidate and attach to a job")
+2. **What is the target base URL?**
+3. **Which capture source?** Live browser (Chrome DevTools MCP), a HAR file you already exported, or cURL strings you copied from DevTools.
 
-The five files land in `out/my-run/`. Both the HAR and the output are gitignored.
+From there it captures the traffic, sanitises it, runs the seven-phase analysis pipeline, and writes `client.ts`, `types.ts`, `errors.ts`, `api-map.md`, and `tests/client.spec.ts` into `out/<run-id>/`. You do not write any code yourself.
 
-### Path B: cURL strings copied from DevTools
+### 4. Use the generated client
 
-Same as Path A but you copy individual requests instead of exporting the whole HAR.
-
-1. In DevTools → Network, right-click the request that does the actual mutation → **Copy → Copy as cURL (bash)**.
-2. Repeat 2-3 times for the same action with different inputs.
-3. Replace step 6 of Path A with:
-
-```ts
-import { parseCurl } from "../src/capture/curl-parser.js";
-
-const exchanges = [
-  parseCurl(`curl 'https://app.your-tool.example/api/candidates' ...`, "req-1"),
-  parseCurl(`curl 'https://app.your-tool.example/api/candidates' ...`, "req-2"),
-  parseCurl(`curl 'https://app.your-tool.example/api/candidates' ...`, "req-3"),
-];
-```
-
-### Path C: live capture inside Claude Code (Chrome DevTools MCP)
-
-If you use Claude Code with the Chrome DevTools MCP server, the skill drives the browser for you.
-
-1. Open Claude Code in this repo or any project, with the Chrome DevTools MCP enabled.
-2. Type `/reverse-engineer`. The skill wizard asks for scope, target URL, and capture source. Pick "live (Chrome MCP)".
-3. The wizard opens the target page, you log in, you do the UI action. The skill captures every network exchange, sanitises it, runs the analysis pipeline, and writes the client into `out/<run-id>/`.
-
-## Using the generated client in your own project
-
-Copy `out/<run-id>/client.ts`, `types.ts`, and `errors.ts` into your application. Then:
+Copy `client.ts`, `types.ts`, and `errors.ts` from `out/<run-id>/` into your project. Then:
 
 ```ts
 import { ApiClient } from "./api/client.js";
@@ -150,7 +100,6 @@ import { ApiClient } from "./api/client.js";
 const api = new ApiClient({
   baseUrl: "https://app.your-tool.example",
   defaultHeaders: {
-    // Whatever your webapp uses. The kit does not capture your session.
     Authorization: `Bearer ${process.env.APP_TOKEN}`,
     "X-CSRF-Token": process.env.APP_CSRF ?? "",
   },
@@ -163,17 +112,18 @@ const candidate = await api.createCandidate({
 });
 ```
 
-The kit does not capture or replay your auth for you. You bring `Authorization`, `Cookie`, `X-CSRF-Token`, or whatever the target expects, via `defaultHeaders` or a custom `fetchImpl`. See `docs/USAGE.md` for the Playwright `storageState` pattern when you want to share a logged-in browser session with the client.
+The skill does not capture or replay your auth. You bring `Authorization`, `Cookie`, `X-CSRF-Token`, or whatever the target expects, via `defaultHeaders` or a custom `fetchImpl`. See `docs/USAGE.md` for the Playwright `storageState` pattern when you want the client to share a logged-in browser session.
 
 ## See it work first
 
-Before pointing the kit at a real target, verify it runs end-to-end on your machine against an open sandbox (real network, no auth):
+To verify the kit runs end-to-end on your machine before pointing it at a real target:
 
 ```bash
+cd ~/.claude/skills/reverse-engineering-api
 npx tsx scripts/e2e-dummyjson.ts
 ```
 
-That run hits `dummyjson.com` six times (POST /posts/add, PUT /posts/1, DELETE /posts/1), writes a sanitised HAR to `captures/<run-id>/raw.har`, generates a client into `out/<run-id>/`, and smoke-tests one generated method. Use it as a known-good reference for what the output should look like.
+That run hits `dummyjson.com` six times (POST /posts/add, PUT /posts/1, DELETE /posts/1), writes a sanitised HAR to `captures/<run-id>/raw.har`, generates a client into `out/<run-id>/`, and smoke-tests one generated method. Use the output as a known-good reference for what `/reverse-engineer` produces against a real target.
 
 ## Privacy and GitHub mode
 
