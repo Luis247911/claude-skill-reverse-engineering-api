@@ -1,0 +1,24 @@
+{
+  "name": "reverse-engineering-kit",
+  "version": "0.1.0",
+  "description": "Methodical reverse engineering of internal webapp APIs into stable TypeScript clients. HAR / cURL / live capture via Chrome DevTools MCP, multi-agent analysis pipeline, generated client + types + tests + docs.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}

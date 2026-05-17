@@ -1,0 +1,1447 @@
+Okay, dann sauber und deutlich: **Reverse Engineering interner APIs ist nicht “ich finde einen geheimen Endpoint”**, sondern ein methodisches Verfahren, um aus dem Verhalten einer Weboberfläche ein technisches Modell der dahinterliegenden Backend-Kommunikation abzuleiten.
+
+Ich beschreibe es jetzt so konkret wie möglich — für **eigene Systeme, Kundenprojekte mit Freigabe oder interne Tools**, nicht für das Aushebeln fremder Plattformen.
+
+---
+
+# 1. Was du eigentlich reverse-engineerst
+
+Eine moderne Webapp besteht grob aus:
+
+```text
+Browser/UI
+  ↓
+Frontend-Code: React, Vue, Angular, Next.js etc.
+  ↓
+HTTP-Requests
+  ↓
+Backend/API
+  ↓
+Datenbank / Services
+```
+
+Wenn du im UI etwas machst, zum Beispiel:
+
+```text
+Kandidat anlegen
+Rechnung herunterladen
+Datensatz aktualisieren
+Kommentar posten
+Status ändern
+```
+
+dann sendet der Browser fast immer eine oder mehrere HTTP-Anfragen an das Backend.
+
+Reverse Engineering heißt:
+
+```text
+Ich beobachte diese Requests,
+verstehe ihre Struktur,
+finde die notwendigen Parameter,
+rekonstruiere die Reihenfolge,
+und baue daraus einen stabilen API-Client.
+```
+
+Das ist exakt der Punkt, an dem Browser-Automatisierung durch direkte API-Nutzung ersetzt werden kann.
+
+---
+
+# 2. Die vier Kernfragen
+
+Bei jeder internen API musst du vier Dinge herausfinden:
+
+```text
+1. Welcher Request macht die eigentliche Aktion?
+2. Welche Daten braucht dieser Request?
+3. Welche Authentifizierung und dynamischen Werte sind nötig?
+4. In welcher Reihenfolge müssen Requests ausgeführt werden?
+```
+
+Ein einzelner Klick im UI kann nämlich nicht nur einen Request auslösen, sondern zehn:
+
+```text
+GET  /api/me
+GET  /api/permissions
+GET  /api/form-config
+POST /api/candidates
+GET  /api/candidates?page=1
+GET  /api/notifications
+```
+
+Der Anfänger kopiert alles.
+Der Profi isoliert den einen Request, der wirklich relevant ist.
+
+---
+
+# 3. Schritt 1: Aktion isolieren
+
+Du startest nicht mit Code. Du startest mit einer **klaren UI-Aktion**.
+
+Schlecht:
+
+```text
+“Analysiere mal die App.”
+```
+
+Gut:
+
+```text
+“Was passiert technisch, wenn ich einen neuen Kandidaten anlege?”
+```
+
+Dann machst du im Browser:
+
+```text
+1. DevTools öffnen
+2. Network-Tab öffnen
+3. Network-Log leeren
+4. Aktion im UI ausführen
+5. Requests beobachten
+6. Relevanten Request identifizieren
+```
+
+Chrome DevTools zeigt im Network-Panel Details zu Requests, Responses, Headers, Payloads, Timing und Initiators; Requests können außerdem kopiert oder als HAR analysiert werden. ([Chrome for Developers][1])
+
+---
+
+# 4. Schritt 2: Den relevanten Request finden
+
+Angenommen, du legst im UI einen Kandidaten an.
+
+Im Network-Tab siehst du vielleicht:
+
+```text
+GET  /static/app.8fd2.js
+GET  /api/session
+GET  /api/users/me
+GET  /api/candidates/form-options
+POST /api/candidates
+GET  /api/candidates?limit=25
+```
+
+Der relevante Request ist wahrscheinlich:
+
+```text
+POST /api/candidates
+```
+
+Warum?
+
+Weil HTTP-Methoden eine Bedeutung haben:
+
+```text
+GET     Daten lesen
+POST    neue Ressource oder Aktion auslösen
+PUT     Ressource komplett ersetzen
+PATCH   Ressource teilweise aktualisieren
+DELETE  Ressource löschen
+```
+
+HTTP definiert Request-Methoden mit bestimmten Semantiken; Statuscodes zeigen anschließend, ob ein Request erfolgreich war, umgeleitet wurde, clientseitig fehlschlug oder serverseitig scheiterte. ([MDN Web Docs][2])
+
+---
+
+# 5. Schritt 3: Request anatomisch zerlegen
+
+Ein Request besteht aus mehreren Teilen:
+
+```http
+POST /api/candidates HTTP/2
+Host: app.example.com
+Content-Type: application/json
+Authorization: Bearer ...
+X-CSRF-Token: ...
+Cookie: session=...
+```
+
+Payload:
+
+```json
+{
+  "firstName": "Max",
+  "lastName": "Muster",
+  "email": "max@example.com",
+  "jobId": "job_123",
+  "source": "manual"
+}
+```
+
+Response:
+
+```json
+{
+  "id": "cand_987",
+  "firstName": "Max",
+  "lastName": "Muster",
+  "email": "max@example.com",
+  "createdAt": "2026-05-17T10:12:00Z"
+}
+```
+
+Jetzt willst du verstehen:
+
+```text
+Welche Felder sind Pflicht?
+Welche Felder sind optional?
+Welche Felder werden vom Frontend generiert?
+Welche Felder kommen vom Backend?
+Welche Header sind notwendig?
+Welche Header sind nur Browser-Rauschen?
+```
+
+---
+
+# 6. Schritt 4: Pflichtfelder durch Variation herausfinden
+
+Du machst denselben UI-Vorgang mehrfach mit leicht unterschiedlichen Daten.
+
+Beispiel:
+
+```text
+Durchlauf 1:
+Max Muster, max@example.com
+
+Durchlauf 2:
+Anna Test, anna@example.com
+
+Durchlauf 3:
+Nur Pflichtfelder ausfüllen
+
+Durchlauf 4:
+Optionales Feld leer lassen
+```
+
+Dann vergleichst du die Payloads.
+
+Beispiel:
+
+```json
+{
+  "firstName": "Max",
+  "lastName": "Muster",
+  "email": "max@example.com",
+  "phone": "",
+  "linkedinUrl": "",
+  "source": "manual",
+  "createdVia": "web"
+}
+```
+
+Mögliche Erkenntnis:
+
+```text
+firstName     Pflichtfeld
+lastName      Pflichtfeld
+email         Pflichtfeld
+phone         optional
+linkedinUrl   optional
+source        fixer Wert
+createdVia    fixer Wert vom Frontend
+```
+
+Am Ende willst du die minimale Payload:
+
+```json
+{
+  "firstName": "Max",
+  "lastName": "Muster",
+  "email": "max@example.com"
+}
+```
+
+Das Ziel ist nicht, den Browser-Request blind 1:1 zu kopieren. Das Ziel ist, ihn auf das **notwendige Minimum** zu reduzieren.
+
+---
+
+# 7. Schritt 5: Dynamische Werte identifizieren
+
+Das ist der wichtigste Teil.
+
+Viele Werte sehen aus wie normale Parameter, sind aber dynamisch.
+
+Typische dynamische Werte:
+
+```text
+Session-Cookie
+Authorization Token
+CSRF Token
+Tenant ID
+Organization ID
+User ID
+Workspace ID
+Form ID
+Entity ID
+Timestamp
+Nonce
+Request ID
+Version ID
+Pagination Cursor
+```
+
+Beispiel:
+
+```http
+POST /api/candidates
+X-CSRF-Token: 8f3a1...
+X-Tenant-ID: tenant_456
+```
+
+Payload:
+
+```json
+{
+  "firstName": "Max",
+  "lastName": "Muster",
+  "email": "max@example.com",
+  "jobId": "job_123"
+}
+```
+
+Dann musst du herausfinden:
+
+```text
+Woher kommt jobId?
+Woher kommt tenantId?
+Woher kommt csrfToken?
+Bleibt der Wert stabil?
+Ändert er sich pro Login?
+Ändert er sich pro Request?
+Kommt er aus einem vorherigen GET-Request?
+Steht er im HTML?
+Steht er im JavaScript-State?
+Kommt er aus LocalStorage, SessionStorage oder Cookie?
+```
+
+Aber wichtig: **Du umgehst Auth nicht.** Du verwendest nur Werte, die deine autorisierte Session ohnehin rechtmäßig bekommt.
+
+---
+
+# 8. Schritt 6: Die Request-Kette rekonstruieren
+
+Manche interne APIs brauchen eine Reihenfolge.
+
+Beispiel: Kandidat für eine bestimmte Stelle anlegen.
+
+Im UI passiert vielleicht:
+
+```text
+1. GET /api/session
+2. GET /api/jobs
+3. GET /api/jobs/job_123/application-form
+4. POST /api/candidates
+5. POST /api/candidates/cand_987/attach-to-job
+```
+
+Dann ist die eigentliche Fachlogik nicht ein Request, sondern eine Kette:
+
+```text
+Job-ID finden
+→ Formular-Konfiguration laden
+→ Kandidaten erstellen
+→ Kandidaten mit Job verknüpfen
+```
+
+Als Diagramm:
+
+```text
+GET /api/jobs
+        ↓
+jobId extrahieren
+        ↓
+GET /api/jobs/{jobId}/application-form
+        ↓
+formId / requiredFields extrahieren
+        ↓
+POST /api/candidates
+        ↓
+candidateId extrahieren
+        ↓
+POST /api/jobs/{jobId}/candidates/{candidateId}
+```
+
+Genau hier trennt sich Spielzeug-Automatisierung von echter Prozessautomatisierung. Du musst nicht nur Requests kopieren, sondern den **Workflow als Zustandsmaschine** verstehen.
+
+---
+
+# 9. Schritt 7: Request minimal reproduzieren
+
+Aus dem Browser-Request machst du zuerst einen Test-Request.
+
+Zum Beispiel als `curl`, aber stark anonymisiert:
+
+```bash
+curl 'https://app.example.com/api/candidates' \
+  -X POST \
+  -H 'content-type: application/json' \
+  -H 'x-csrf-token: <CSRF_TOKEN>' \
+  -b 'session=<SESSION_COOKIE>' \
+  --data-raw '{
+    "firstName": "Max",
+    "lastName": "Muster",
+    "email": "max@example.com"
+  }'
+```
+
+Chrome DevTools unterstützt “Copy as cURL” für Netzwerkressourcen; dabei werden auch Request-Header übernommen, weshalb solche Exporte sensible Daten enthalten können und nicht ungeschützt geteilt werden sollten. ([Chrome for Developers][3])
+
+Danach testest du:
+
+```text
+Kommt 200, 201 oder 204 zurück?
+Wird der Datensatz wirklich erstellt?
+Was passiert bei ungültigen Daten?
+Was passiert bei fehlenden Pflichtfeldern?
+Was passiert bei doppelter E-Mail?
+Was passiert ohne CSRF-Token?
+Was passiert ohne Tenant-ID?
+```
+
+Statuscodes helfen dir dabei, Fehler einzuordnen: 2xx steht für erfolgreiche Antworten, 4xx für clientseitige Fehler und 5xx für serverseitige Fehler. ([MDN Web Docs][4])
+
+---
+
+# 10. Schritt 8: Header aufräumen
+
+Ein kopierter Browser-Request enthält oft viel Müll.
+
+Zum Beispiel:
+
+```http
+accept: */*
+accept-language: de-DE,de;q=0.9
+cache-control: no-cache
+priority: u=1, i
+sec-ch-ua: ...
+sec-fetch-dest: empty
+sec-fetch-mode: cors
+sec-fetch-site: same-origin
+user-agent: ...
+```
+
+Nicht alles davon brauchst du.
+
+Du klassifizierst Header:
+
+## Meist wichtig
+
+```text
+Authorization
+Cookie
+Content-Type
+X-CSRF-Token
+X-Tenant-ID
+X-Organization-ID
+Idempotency-Key
+```
+
+## Oft optional
+
+```text
+Accept
+Accept-Language
+User-Agent
+Referer
+Origin
+```
+
+## Meist Browser-spezifisch / nicht manuell setzen
+
+```text
+sec-ch-ua
+sec-fetch-mode
+sec-fetch-site
+priority
+connection
+content-length
+```
+
+HTTP-Header transportieren Zusatzinformationen zwischen Client und Server; in DevTools sieht man je nach HTTP-Version auch normalisierte beziehungsweise kleingeschriebene Headernamen. ([MDN Web Docs][5])
+
+Deine Aufgabe ist:
+
+```text
+So wenig Header wie möglich,
+so viele wie nötig.
+```
+
+---
+
+# 11. Schritt 9: Response-Modell ableiten
+
+Jetzt schaust du dir die Responses an.
+
+Beispiel:
+
+```json
+{
+  "data": {
+    "id": "cand_987",
+    "type": "candidate",
+    "attributes": {
+      "firstName": "Max",
+      "lastName": "Muster",
+      "email": "max@example.com"
+    }
+  },
+  "meta": {
+    "requestId": "req_abc"
+  }
+}
+```
+
+Daraus leitest du ein Modell ab:
+
+```ts
+type Candidate = {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+};
+```
+
+Oder bei Python:
+
+```python
+from pydantic import BaseModel
+
+class Candidate(BaseModel):
+    id: str
+    firstName: str
+    lastName: str
+    email: str
+```
+
+Wichtig ist nicht nur das Happy Path-Modell, sondern auch Fehler.
+
+Beispiel Fehlerresponse:
+
+```json
+{
+  "error": {
+    "code": "EMAIL_ALREADY_EXISTS",
+    "message": "Candidate with this email already exists",
+    "field": "email"
+  }
+}
+```
+
+Daraus baust du später saubere Fehlerbehandlung.
+
+---
+
+# 12. Schritt 10: Aus Request wird Client
+
+Jetzt wird aus dem reverse-engineerten Request eine Funktion.
+
+Zum Beispiel TypeScript:
+
+```ts
+type CreateCandidateInput = {
+  firstName: string;
+  lastName: string;
+  email: string;
+};
+
+type Candidate = {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+};
+
+async function createCandidate(input: CreateCandidateInput): Promise<Candidate> {
+  const response = await fetch("/api/candidates", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(input)
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`createCandidate failed: ${response.status} ${errorBody}`);
+  }
+
+  const body = await response.json();
+
+  return {
+    id: body.id,
+    firstName: body.firstName,
+    lastName: body.lastName,
+    email: body.email
+  };
+}
+```
+
+Aber Achtung: Das ist noch die einfache Version. Eine produktive Version braucht:
+
+```text
+Timeouts
+Retries
+Rate-Limit-Handling
+Logging
+Fehlerklassen
+Input Validation
+Response Validation
+Idempotenz
+Auth Refresh
+Audit Trail
+Tests
+```
+
+---
+
+# 13. Schritt 11: Den Flow produktionsfähig machen
+
+Ein interner API-Client sollte nicht einfach stumpf Requests senden.
+
+Er sollte fachlich denken.
+
+Schlecht:
+
+```ts
+await createCandidate(data);
+```
+
+Besser:
+
+```ts
+const existing = await findCandidateByEmail(data.email);
+
+if (existing) {
+  return existing;
+}
+
+return await createCandidate(data);
+```
+
+Warum? Weil du sonst bei jedem Retry doppelte Datensätze erzeugen kannst.
+
+Für produktive Automatisierung brauchst du deshalb häufig:
+
+```text
+Vorher prüfen: Existiert Ressource schon?
+Dann erstellen oder aktualisieren
+Danach validieren: Ist Zustand korrekt?
+Bei Fehler: sauber abbrechen
+Bei Retry: keine Duplikate erzeugen
+```
+
+Das nennt man idempotentes Design.
+
+---
+
+# 14. Der echte Reverse-Engineering-Algorithmus
+
+Wenn du es ganz systematisch willst, sieht der Prozess so aus:
+
+```text
+1. Scope definieren
+   Welche UI-Aktion soll automatisiert werden?
+
+2. Baseline aufnehmen
+   Network-Log leeren, Aktion einmal sauber durchführen.
+
+3. Requests gruppieren
+   Static Assets, Analytics, Auth, Daten-Requests, Mutations trennen.
+
+4. Kandidaten identifizieren
+   POST/PATCH/DELETE sind besonders relevant.
+
+5. Payload analysieren
+   Felder, Typen, Pflichtwerte, optionale Werte bestimmen.
+
+6. Dynamische Werte markieren
+   IDs, Tokens, Timestamps, Session-Kontext, Cursor.
+
+7. Herkunft dynamischer Werte finden
+   Vorherige Responses, URL, Storage, Cookies, HTML, App-State.
+
+8. Minimalrequest bauen
+   Alles entfernen, was nicht nötig ist.
+
+9. Replay testen
+   Gleiche Aktion außerhalb des UI reproduzieren.
+
+10. Negative Tests
+   Fehlende Felder, falsche IDs, Duplikate, abgelaufene Session.
+
+11. Workflow modellieren
+   Request-Reihenfolge und Datenabhängigkeiten dokumentieren.
+
+12. Client implementieren
+   Funktionen, Typen, Fehlerhandling, Logging.
+
+13. Stabilität testen
+   Mehrere User, mehrere Datensätze, verschiedene Rollen.
+
+14. Compliance prüfen
+   Berechtigungen, AGB, Datenschutz, Rate Limits, Audit.
+
+15. Dokumentation schreiben
+   Endpoint, Methode, Payload, Response, Fehler, Annahmen.
+```
+
+Das ist der saubere Prozess.
+
+---
+
+# 15. Konkretes Beispiel: Kandidatenimport
+
+Nehmen wir an, du willst Kandidaten aus einer CSV in ein Recruiting-Tool importieren.
+
+## UI-Aktion
+
+```text
+Recruiting-App öffnen
+Kandidat erstellen
+Name, E-Mail, Telefonnummer eintragen
+Speichern klicken
+```
+
+## Beobachtete Requests
+
+```text
+GET  /api/me
+GET  /api/jobs
+GET  /api/sources
+POST /api/candidates
+POST /api/candidates/cand_123/applications
+```
+
+## Interpretation
+
+```text
+/api/me
+→ liefert User, Tenant, Berechtigungen
+
+/api/jobs
+→ liefert verfügbare Stellen
+
+/api/sources
+→ liefert Auswahlwerte wie LinkedIn, Referral, Website
+
+/api/candidates
+→ erstellt Kandidaten
+
+/api/candidates/{id}/applications
+→ ordnet Kandidaten einer Stelle zu
+```
+
+## Datenabhängigkeit
+
+```text
+jobId kommt aus /api/jobs
+sourceId kommt aus /api/sources
+candidateId kommt aus POST /api/candidates
+```
+
+## Ziel-Workflow
+
+```text
+1. Lade Jobs
+2. Finde passende jobId
+3. Lade Sources
+4. Finde passende sourceId
+5. Erstelle Kandidaten
+6. Hänge Kandidaten an Job
+7. Prüfe, ob Kandidat sichtbar ist
+```
+
+## Pseudocode
+
+```ts
+async function importCandidate(row: CsvRow) {
+  const job = await findJobByTitle(row.jobTitle);
+  const source = await findSourceByName(row.source);
+
+  const existingCandidate = await findCandidateByEmail(row.email);
+
+  const candidate = existingCandidate ?? await createCandidate({
+    firstName: row.firstName,
+    lastName: row.lastName,
+    email: row.email,
+    phone: row.phone,
+    sourceId: source.id
+  });
+
+  await attachCandidateToJob({
+    candidateId: candidate.id,
+    jobId: job.id
+  });
+
+  return candidate;
+}
+```
+
+Das ist Reverse Engineering in brauchbar: Du baust nicht nur einen Request nach, sondern rekonstruierst den fachlichen Prozess.
+
+---
+
+# 16. Wie Claude Code konkret hilft
+
+Claude Code ist hier vor allem nützlich für Analyse und Umsetzung.
+
+Du gibst ihm zum Beispiel:
+
+```text
+- eine anonymisierte HAR-Datei
+- mehrere kopierte cURL-Requests
+- Beispiel-Responses
+- den Zielprozess
+- deine bestehende Codebase
+```
+
+Dann lässt du es strukturieren.
+
+Guter Prompt:
+
+```text
+Analysiere diese anonymisierten Network-Requests aus unserer eigenen Webapp.
+
+Zielprozess:
+Ein Kandidat soll erstellt und anschließend einer Stelle zugeordnet werden.
+
+Aufgaben:
+1. Gruppiere die Requests nach Zweck.
+2. Identifiziere die fachlich relevanten API-Requests.
+3. Erkenne dynamische Werte und deren Herkunft.
+4. Leite minimale Payloads ab.
+5. Erstelle TypeScript-Typen für Request und Response.
+6. Schreibe einen API-Client mit createCandidate(), listJobs(), attachCandidateToJob().
+7. Baue Fehlerbehandlung für 400, 401, 403, 409 und 429 ein.
+8. Keine Umgehung von Auth, Captchas, Rate Limits oder Zugriffskontrollen.
+```
+
+Noch besser mit mehreren Beispielen:
+
+```text
+Hier sind drei Requests für das Erstellen unterschiedlicher Kandidaten.
+Vergleiche die Payloads und markiere:
+- konstante Felder
+- variable Felder
+- Pflichtfelder
+- optionale Felder
+- vermutlich vom Backend generierte Felder
+- vermutlich vom Frontend gesetzte Felder
+```
+
+Claude Code kann dann sehr gut aus Rohmaterial eine saubere API-Dokumentation und Client-Struktur machen.
+
+---
+
+# 17. HAR-Dateien: nützlich, aber gefährlich
+
+Eine HAR-Datei enthält oft:
+
+```text
+URLs
+Headers
+Cookies
+Request Bodies
+Response Bodies
+Tokens
+personenbezogene Daten
+```
+
+Deshalb:
+
+```text
+Nie roh an Dritte schicken
+Tokens entfernen
+Cookies entfernen
+Personendaten anonymisieren
+Secrets ersetzen
+```
+
+Chrome DevTools kann Network-Daten als HAR exportieren; neuere DevTools-Versionen unterscheiden dabei auch zwischen sanitisierter Variante und Export mit sensitiven Daten. ([Chrome for Developers][1])
+
+---
+
+# 18. Wie du erkennst, ob ein Request wichtig ist
+
+Faustregeln:
+
+## Wahrscheinlich relevant
+
+```text
+POST /api/...
+PATCH /api/...
+PUT /api/...
+DELETE /api/...
+GraphQL mutations
+Requests direkt nach Button-Klick
+Requests mit JSON-Payload
+Requests mit Business-Begriffen in URL oder Body
+```
+
+## Meist nicht relevant
+
+```text
+.js
+.css
+.png
+.svg
+/fonts
+/analytics
+/tracking
+/sentry
+/logs
+/feature-flags
+```
+
+## Manchmal relevant
+
+```text
+/config
+/bootstrap
+/me
+/session
+/permissions
+/metadata
+/form-schema
+```
+
+Gerade `/metadata`, `/schema`, `/form-config` oder `/bootstrap` sind oft Gold wert, weil sie erklären, welche Felder erlaubt oder erforderlich sind.
+
+---
+
+# 19. GraphQL-Sonderfall
+
+Viele moderne Apps verwenden GraphQL.
+
+Dann sieht der Network-Tab vielleicht nicht so aus:
+
+```text
+POST /api/candidates
+```
+
+sondern so:
+
+```text
+POST /graphql
+```
+
+Payload:
+
+```json
+{
+  "operationName": "CreateCandidate",
+  "variables": {
+    "input": {
+      "firstName": "Max",
+      "lastName": "Muster",
+      "email": "max@example.com"
+    }
+  },
+  "query": "mutation CreateCandidate($input: CreateCandidateInput!) { ... }"
+}
+```
+
+Dann reverse-engineerst du nicht viele URLs, sondern:
+
+```text
+operationName
+query
+variables
+input types
+response fields
+```
+
+Bei GraphQL ist besonders wichtig:
+
+```text
+Welche operationName?
+Welche variables?
+Welche IDs?
+Welche fragments?
+Welche Fehlerstruktur?
+```
+
+---
+
+# 20. REST-Sonderfall
+
+Bei REST-artigen APIs erkennst du Ressourcen oft an der URL:
+
+```text
+GET    /api/candidates
+POST   /api/candidates
+GET    /api/candidates/{id}
+PATCH  /api/candidates/{id}
+DELETE /api/candidates/{id}
+```
+
+Dann kannst du ziemlich gut ein Ressourcenmodell ableiten:
+
+```text
+Candidate
+Job
+Application
+User
+Organization
+Attachment
+Comment
+Status
+```
+
+Daraus entsteht später dein Client:
+
+```ts
+client.candidates.create()
+client.candidates.update()
+client.candidates.list()
+client.jobs.list()
+client.applications.create()
+```
+
+---
+
+# 21. Datei-Uploads sind komplexer
+
+Bei Datei-Uploads gibt es oft mehrstufige Flows.
+
+Beispiel Lebenslauf hochladen:
+
+```text
+1. POST /api/uploads/presign
+2. PUT  https://storage.example.com/signed-url
+3. POST /api/candidates/{id}/attachments
+```
+
+Interpretation:
+
+```text
+/api/uploads/presign
+→ App fragt eine Upload-URL an
+
+PUT signed URL
+→ Datei wird direkt in S3/GCS/Azure Blob hochgeladen
+
+/api/candidates/{id}/attachments
+→ Backend verknüpft Datei mit Kandidat
+```
+
+Der Anfänger sieht nur den PUT-Request und wundert sich.
+Der Profi versteht: Der eigentliche fachliche Abschluss ist oft der letzte `POST`, nicht der reine Datei-Upload.
+
+---
+
+# 22. Pagination, Filter und Suche
+
+Listen-Endpoints sind ein eigener Bereich.
+
+Beispiel:
+
+```text
+GET /api/candidates?limit=25&offset=0
+```
+
+oder:
+
+```text
+GET /api/candidates?cursor=eyJpZCI6...
+```
+
+Du musst verstehen:
+
+```text
+Wie wird paginiert?
+limit/offset?
+cursor?
+page/pageSize?
+sort?
+filter?
+search?
+```
+
+Beispiel:
+
+```text
+GET /api/candidates?search=max&status=active&limit=50
+```
+
+Daraus wird:
+
+```ts
+async function searchCandidates(query: string) {
+  return get("/api/candidates", {
+    search: query,
+    status: "active",
+    limit: 50
+  });
+}
+```
+
+Bei Cursor-Pagination musst du Responses lesen:
+
+```json
+{
+  "items": [...],
+  "nextCursor": "abc123"
+}
+```
+
+Dann iterierst du:
+
+```text
+Request 1 mit cursor leer
+Request 2 mit nextCursor aus Response 1
+Request 3 mit nextCursor aus Response 2
+```
+
+---
+
+# 23. Auth: was du verstehen musst
+
+Auth ist kein Detail, sondern zentral.
+
+Typische Varianten:
+
+```text
+Session-Cookie
+Bearer Token
+CSRF Token
+OAuth Flow
+SAML/SSO
+JWT
+API Key
+```
+
+Für interne Webapps ist häufig:
+
+```text
+Cookie + CSRF Token
+```
+
+oder:
+
+```text
+Bearer Token im Authorization Header
+```
+
+Wichtig:
+
+```text
+Tokens nicht hardcoden
+Cookies nicht in Git speichern
+Sessions nicht zwischen Nutzern teilen
+Refresh/Expiry berücksichtigen
+keine Schutzmechanismen umgehen
+```
+
+Für Tests kann Playwright nützlich sein, weil `APIRequestContext` mit einem BrowserContext Cookie-Speicher teilen kann; dadurch können API-nahe Tests innerhalb eines legitimen Browser-Kontexts arbeiten. ([playwright.dev][6])
+
+---
+
+# 24. Fehlerfälle systematisch testen
+
+Du bist erst fertig, wenn du nicht nur den Erfolgspfad kennst.
+
+Teste:
+
+```text
+400 Bad Request
+→ Payload falsch oder Pflichtfeld fehlt
+
+401 Unauthorized
+→ nicht eingeloggt oder Token abgelaufen
+
+403 Forbidden
+→ eingeloggt, aber keine Berechtigung
+
+404 Not Found
+→ Ressource existiert nicht oder falscher Tenant
+
+409 Conflict
+→ Duplikat, Versionskonflikt, Zustand nicht erlaubt
+
+422 Unprocessable Entity
+→ Validierung fehlgeschlagen
+
+429 Too Many Requests
+→ Rate Limit
+
+500/502/503
+→ Serverproblem, Retry eventuell sinnvoll
+```
+
+Eine solide Automatisierung behandelt diese Fälle explizit.
+
+Schlecht:
+
+```ts
+throw new Error("failed");
+```
+
+Besser:
+
+```ts
+if (response.status === 409) {
+  throw new DuplicateCandidateError(email);
+}
+
+if (response.status === 403) {
+  throw new PermissionDeniedError("Missing permission to create candidate");
+}
+
+if (response.status === 429) {
+  throw new RateLimitError("Retry later");
+}
+```
+
+---
+
+# 25. Wie du dokumentierst
+
+Am Ende sollte für jeden Endpoint eine Mini-Doku entstehen.
+
+Beispiel:
+
+```md
+## Create Candidate
+
+Method:
+POST
+
+Path:
+/api/candidates
+
+Purpose:
+Creates a new candidate in the active tenant.
+
+Auth:
+Requires authenticated session cookie and CSRF token.
+
+Required body:
+- firstName: string
+- lastName: string
+- email: string
+
+Optional body:
+- phone: string
+- sourceId: string
+
+Response:
+201 Created
+
+Returns:
+- id
+- firstName
+- lastName
+- email
+- createdAt
+
+Known errors:
+- 400: invalid payload
+- 401: unauthenticated
+- 403: missing permission
+- 409: email already exists
+- 422: validation error
+
+Dependencies:
+- sourceId can be obtained from GET /api/sources
+- jobId can be obtained from GET /api/jobs
+```
+
+Das ist der Punkt, an dem aus Reverse Engineering interne Dokumentation wird.
+
+---
+
+# 26. Der wichtigste Unterschied: “Endpoint finden” vs. “System verstehen”
+
+Endpoint finden ist leicht.
+
+```text
+POST /api/candidates
+```
+
+System verstehen ist schwer:
+
+```text
+Wann darf ich ihn aufrufen?
+Mit welcher Rolle?
+In welchem Tenant?
+Mit welchem CSRF?
+Mit welchem vorherigen State?
+Welche Side Effects entstehen?
+Welche Events werden ausgelöst?
+Was passiert bei Duplikaten?
+Wie erkenne ich Erfolg fachlich?
+```
+
+Wenn du nur den Endpoint kopierst, baust du fragile Automatisierung.
+
+Wenn du den Prozess modellierst, baust du belastbare Automatisierung.
+
+---
+
+# 27. Praktischer Arbeitsmodus mit Claude Code
+
+So würde ich Claude Code tatsächlich einsetzen.
+
+## Input vorbereiten
+
+Du gibst ihm:
+
+```text
+1. Zielprozess
+2. anonymisierte cURL-Requests
+3. Beispiel-Responses
+4. bekannte UI-Schritte
+5. gewünschte Sprache: TypeScript/Python
+6. gewünschtes Ergebnis: Client, Tests, Doku
+```
+
+## Beispielstruktur
+
+```text
+/project
+  /samples
+    create-candidate-1.curl
+    create-candidate-2.curl
+    create-candidate-response.json
+    attach-to-job.curl
+    attach-to-job-response.json
+  /src
+    api-client.ts
+```
+
+## Claude-Code-Prompt
+
+```text
+Wir reverse-engineeren autorisiert unsere eigene interne Recruiting-Webapp.
+
+Ziel:
+CSV-Kandidaten importieren und einer Stelle zuordnen.
+
+Bitte analysiere die Dateien in /samples.
+
+Erstelle:
+1. Eine Endpoint-Übersicht.
+2. Eine Liste dynamischer Werte und deren vermutete Herkunft.
+3. Minimale Request-Payloads.
+4. TypeScript-Typen.
+5. Einen ApiClient mit:
+   - listJobs()
+   - findJobByTitle()
+   - createCandidate()
+   - findCandidateByEmail()
+   - attachCandidateToJob()
+6. Fehlerklassen für 400, 401, 403, 409, 422, 429.
+7. Tests mit gemockten Responses.
+
+Wichtig:
+Keine Auth-Umgehung.
+Keine Captcha-Umgehung.
+Keine Rate-Limit-Umgehung.
+Keine echten Secrets in Code oder Tests.
+```
+
+Das ist sehr konkret und produktiv.
+
+---
+
+# 28. Sauberer Output: Was am Ende rauskommen sollte
+
+Am Ende hast du idealerweise:
+
+```text
+api-map.md
+→ dokumentierte Endpoints und Workflows
+
+client.ts / client.py
+→ sauberer API-Client
+
+types.ts / models.py
+→ Request/Response-Modelle
+
+errors.ts
+→ fachliche Fehlerklassen
+
+tests/
+→ Unit- und Integrationstests
+
+.env.example
+→ notwendige Konfiguration ohne Secrets
+
+README.md
+→ Nutzungsanleitung und Grenzen
+```
+
+Nicht:
+
+```text
+random-script-final-v7.js
+```
+
+Wenn du so arbeitest, wird daraus eine echte technische Integration statt Bastelcode.
+
+---
+
+# 29. Harte Wahrheit
+
+Das Reverse Engineering selbst ist oft nicht der schwierige Teil. Der schwierige Teil ist:
+
+```text
+Stabilität
+Wartbarkeit
+Berechtigungen
+Fehlerfälle
+Datenqualität
+Compliance
+Änderungen im Backend
+```
+
+Deshalb ist diese Haltung falsch:
+
+```text
+“Wir brauchen keine offiziellen APIs mehr.”
+```
+
+Die bessere Haltung ist:
+
+```text
+“Wir können interne UI-Flows in API-nahe Automatisierungen übersetzen, wenn wir die Risiken sauber managen.”
+```
+
+Das ist der professionelle Blick.
+
+---
+
+# 30. Kurzform als Merkschema
+
+```text
+Klick beobachten
+→ Requests filtern
+→ Mutation finden
+→ Payload vergleichen
+→ dynamische Werte markieren
+→ Herkunft dynamischer Werte finden
+→ Request minimal nachbauen
+→ Fehlerfälle testen
+→ Workflow modellieren
+→ Client schreiben
+→ dokumentieren
+→ überwachen
+```
+
+Oder noch knapper:
+
+```text
+UI-Aktion
+→ Netzwerkspur
+→ API-Modell
+→ stabiler Client
+```
+
+Genau das ist Reverse Engineering interner APIs.
+
+[1]: https://developer.chrome.com/docs/devtools/network/reference?utm_source=chatgpt.com "Network features reference | Chrome DevTools"
+[2]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Methods?utm_source=chatgpt.com "HTTP request methods - MDN Web Docs"
+[3]: https://developer.chrome.com/blog/replay-a-network-request-in-curl?utm_source=chatgpt.com "Replay a network request in cURL | Blog"
+[4]: https://developer.mozilla.org/de/docs/Web/HTTP/Reference/Status?utm_source=chatgpt.com "HTTP-Antwortstatuscodes - MDN Web Docs"
+[5]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers?utm_source=chatgpt.com "HTTP headers - MDN Web Docs - Mozilla"
+[6]: https://playwright.dev/docs/api/class-apirequestcontext?utm_source=chatgpt.com "APIRequestContext"

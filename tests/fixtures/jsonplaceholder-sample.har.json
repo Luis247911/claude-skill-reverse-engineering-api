@@ -1,0 +1,55 @@
+{
+  "log": {
+    "version": "1.2",
+    "creator": { "name": "test-fixture", "version": "1.0" },
+    "entries": [
+      {
+        "startedDateTime": "2026-05-17T10:00:00.000Z",
+        "time": 42,
+        "request": {
+          "method": "GET",
+          "url": "https://jsonplaceholder.typicode.com/users",
+          "headers": [{ "name": "Accept", "value": "application/json" }],
+          "queryString": []
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": [{ "name": "Content-Type", "value": "application/json; charset=utf-8" }],
+          "content": {
+            "size": 50,
+            "mimeType": "application/json",
+            "text": "[{\"id\":1,\"name\":\"Leanne\",\"email\":\"l@x.com\"}]"
+          }
+        }
+      },
+      {
+        "startedDateTime": "2026-05-17T10:00:01.000Z",
+        "time": 67,
+        "request": {
+          "method": "POST",
+          "url": "https://jsonplaceholder.typicode.com/posts",
+          "headers": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Authorization", "value": "Bearer eyJhbGciOi1234.eyJzdWIi5678.SflKxAB9" }
+          ],
+          "queryString": [],
+          "postData": {
+            "mimeType": "application/json",
+            "text": "{\"title\":\"foo\",\"body\":\"bar\",\"userId\":1}"
+          }
+        },
+        "response": {
+          "status": 201,
+          "statusText": "Created",
+          "headers": [{ "name": "Content-Type", "value": "application/json" }],
+          "content": {
+            "size": 50,
+            "mimeType": "application/json",
+            "text": "{\"id\":101,\"title\":\"foo\",\"body\":\"bar\",\"userId\":1}"
+          }
+        }
+      }
+    ]
+  }
+}

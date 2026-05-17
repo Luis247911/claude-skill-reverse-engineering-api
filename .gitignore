@@ -1,0 +1,34 @@
+# --- Privacy Contract: nothing private leaves this machine ---
+# Capture runs, generated clients, scope notes are all per-run private.
+captures/*
+!captures/.gitkeep
+out/*
+!out/.gitkeep
+scope/*
+!scope/.gitkeep
+
+# HAR files everywhere except the curated public samples folder.
+*.har
+!samples/public/*.har
+
+# Anything that looks like raw auth material.
+**/*.cookies
+**/*.token
+**/*.jwt
+**/*.private.json
+**/secrets/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Build / dependency / OS noise
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
